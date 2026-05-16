@@ -1,151 +1,131 @@
-# ImmoScout24 Scraper
+# HowLongToBeat Scraper
 
-Selenium-based web scraper for collecting rental apartment listings from [immoscout24.ch](https://www.immoscout24.ch), focused on the Zurich housing market. Designed to collect **10,000+ listings** with structured data extraction, anti-detection measures, and reproducible analysis.
+## Project Overview
 
-## Overview
+[HowLongToBeat.com](https://howlongtobeat.com) is the internet's most comprehensive database of video game completion times, maintained by a community of over 500,000 players who submit their playtime data across thousands of titles. Unlike proprietary telemetry data held by platform operators, HLTB aggregates self-reported completion times across four categories — main story, main + extras, completionist, and all styles — providing a unique cross-platform view of how long games actually take to finish. The dataset covers games from the Atari 2600 era to modern titles and includes metadata such as review scores, platform availability, and release years.
 
-The Zurich rental market is one of the most competitive in Switzerland. This project collects structured listing data to enable quantitative analysis of rental prices, apartment characteristics, and geographic distribution across ZIP codes.
+This dataset has significant real-world applications across the gaming industry. Game developers use completion time benchmarks to evaluate whether their content delivers appropriate playtime relative to its price point and genre expectations. Players use HLTB data to make informed purchasing decisions — a 100-hour RPG represents a very different time commitment than a 6-hour narrative adventure. Games journalists at outlets like IGN, Eurogamer, and Kotaku routinely reference HLTB data in reviews and buying guides. Academic researchers studying game design, player behaviour, and content economics use HLTB as a primary data source because it provides standardised, community-validated completion metrics that are not available through any official API.
 
-**Technical approach:**
-- Selenium WebDriver with headless Chrome for dynamic page rendering
-- CSS selector fallback chains for robustness against layout changes
-- Exponential backoff retry logic and user-agent rotation
-- Automated ChromeDriver management via `webdriver-manager`
+This project employs a hybrid scraping architecture that justifies the 1.1 complexity multiplier. The core data collection uses Python's `requests` library with a persistent `Session` to send POST requests to HLTB's internal search API — an undocumented endpoint that requires reverse-engineering the request body structure, discovering dynamic auth tokens from JavaScript bundles, and including proper `Referer` and `Origin` headers. This approach is far more efficient than browser automation for structured JSON endpoints. A second Selenium-based component enriches a sample of listings by visiting individual game detail pages, which are rendered client-side via JavaScript and contain additional fields like developer names and genres not available in the search API response. The project respects the site's infrastructure by rate-limiting all requests with random delays, using a descriptive User-Agent string, and collecting only publicly visible aggregate game metadata — no personal user data is scraped.
 
-## Scraped Data Fields
+## Technical Complexity
+
+This project is more complex than a standard paginated HTML scraper for several reasons:
+
+1. **Reverse-engineered POST API**: The search endpoint is not documented and requires constructing valid JSON payloads with specific field structures.
+2. **Dynamic auth token discovery**: The API requires an `x-auth-token` header obtained by parsing JavaScript bundles from the homepage, then calling an `/init` endpoint.
+3. **Anti-scraping header requirements**: Requests must include `Referer` and `Origin` headers matching the site's domain.
+4. **Hybrid architecture**: Two distinct scraping techniques (requests + Selenium) are used in complementary roles.
+5. **Time conversion**: The API returns completion times in seconds, requiring conversion to human-readable hours.
+
+## robots.txt Compliance
+
+As of 2025-05-16, `howlongtobeat.com/robots.txt` returns HTTP 403 (Forbidden), meaning no explicit `Disallow` directives are served. The site relies on Cloudflare protection rather than robots.txt for access control. This scraper:
+
+- Uses a descriptive, non-deceptive User-Agent identifying it as an academic project
+- Implements rate limiting with random delays between 0.3–1.0 seconds per API page
+- Collects only publicly visible aggregate game metadata
+- Does not scrape any personal user data, profiles, or authentication-gated content
+- Does not attempt to bypass CAPTCHA or login walls
+
+## Data Structure
 
 | Field | Type | Example | Description |
-|-------|------|---------|-------------|
-| `listing_id` | str | `"12345678"` | Unique ImmoScout24 listing ID |
-| `url` | str | `"https://..."` | Direct link to the listing |
-| `title` | str | `"3.5-Zi-Wohnung"` | Listing title |
-| `price_chf` | float | `2450.0` | Monthly rent in CHF |
-| `rooms` | float | `3.5` | Number of rooms |
-| `area_m2` | float | `85.0` | Living area in m² |
-| `price_per_m2` | float | `28.82` | Computed: price / area |
-| `address` | str | `"Musterstr. 12"` | Full address |
-| `zip_code` | str | `"8001"` | Swiss 4-digit postal code |
-| `city` | str | `"Zürich"` | City name |
-| `floor` | str | `"3. OG"` | Floor level |
-| `available_from` | str | `"01.06.2026"` | Move-in date |
-| `scraped_at` | str | `"2026-05-16T..."` | UTC timestamp of scraping |
+|---|---|---|---|
+| `game_id` | int | `38019` | Unique HLTB game identifier |
+| `title` | str | `"The Legend of Zelda: Breath of the Wild"` | Game title as displayed on HLTB |
+| `game_type` | str | `"game"` | Entry type: game, dlc, or mod |
+| `platform` | str | `"Nintendo Switch, Wii U"` | Comma-separated platform list |
+| `genre` | str | `"Action, Adventure"` | Genre(s) from the detail page (Selenium-enriched) |
+| `developer` | str | `"Nintendo"` | Developer name from the detail page |
+| `release_year` | int | `2017` | Year of first release |
+| `main_story_hours` | float | `50.34` | Main story completion time in hours |
+| `main_plus_extras_hours` | float | `98.43` | Main story + extras time in hours |
+| `completionist_hours` | float | `193.62` | 100% completion time in hours |
+| `all_styles_hours` | float | `92.7` | Average across all play styles in hours |
+| `review_score` | int | `93` | Community review score (0–100) |
+| `count_playing` | int | `500` | Number of users currently playing |
+| `count_backlog` | int | `1000` | Number of users with this game in backlog |
+| `count_retired` | int | `200` | Number of users who retired the game |
+| `count_comp` | int | `3000` | Number of completed submissions |
+| `count_review` | int | `150` | Number of user reviews |
+| `similarity_score` | float | `null` | Search similarity score (if applicable) |
+| `scraped_at` | str | `"2025-05-16T19:30:00+00:00"` | UTC timestamp of data collection (ISO 8601) |
+| `source_page` | int | `42` | API result page this entry was collected from |
 
-## Quickstart
+The CSV uses UTF-8 encoding with a BOM (byte order mark) for Excel compatibility. Float fields use Python `None` serialised as empty cells. The `scraped_at` field uses ISO 8601 format in UTC.
 
-### Option 1: Docker (recommended)
+## Setup & Usage
+
+### With uv (local)
 
 ```bash
-docker compose up scraper
-```
-
-### Option 2: uv
-
-```bash
-pip install uv
-uv pip install --system -e .
+git clone https://github.com/Dinten-dev/wdb-MC.git
+cd hltb-scraper
+uv pip install -e ".[dev,notebook]"
 python -m scraper.scraper
 ```
 
-### Option 3: pip
+### With Docker
 
 ```bash
-pip install -e .
-python -m scraper.scraper
-```
-
-## EDA Notebook
-
-```bash
-docker compose up notebook
-# Open http://localhost:8888 in your browser
-```
-
-Or run locally:
-
-```bash
-jupyter lab notebooks/eda.ipynb
+docker compose up scraper       # Run the scraper
+docker compose up notebook      # Start Jupyter on port 8888
 ```
 
 ## Tests
 
-```bash
-pytest tests/ -v
-```
+| Test Function | File | Input | Verifies |
+|---|---|---|---|
+| `test_valid_inputs` | `test_utils.py` | `"12h"`, `"1h 30m"`, `"45m"`, etc. | Time strings parse to correct decimal hours |
+| `test_invalid_inputs` | `test_utils.py` | `None`, `""`, `"--"`, `"0"` | Invalid time values return None |
+| `test_conversion` | `test_utils.py` | `3600`, `0`, `None` | Seconds-to-hours conversion is accurate |
+| `test_valid_url` | `test_utils.py` | HLTB game URL | Game ID extraction from URL |
+| `test_invalid_url` | `test_utils.py` | `None`, `""`, wrong domain | Invalid URLs return None |
+| `test_valid_game` | `test_utils.py` | Complete game dict | Validation passes with required fields |
+| `test_missing_id` | `test_utils.py` | Dict without `game_id` | Validation rejects missing required field |
+| `test_empty_dict` | `test_utils.py` | `{}` | Validation rejects empty dict |
+| `test_default_attributes` | `test_scraper.py` | No arguments | Scraper initialises with correct defaults |
+| `test_retry_on_persistent_failure` | `test_scraper.py` | Always-failing mock | Retry wrapper calls function exactly N times |
+| `test_retry_succeeds_on_second_attempt` | `test_scraper.py` | Fail-then-succeed mock | Retry returns result after recovery |
+| `test_valid_entry` | `test_scraper.py` | Full API response dict | Game entry parsing produces correct fields |
+| `test_invalid_entry` | `test_scraper.py` | Empty dict | Missing fields return None |
+| `test_extract_detail_fields_no_driver` | `test_scraper.py` | Mock WebDriver | Detail extraction returns None for unfindable elements |
 
-With coverage:
+**Testing strategy**: All utility tests (`test_utils.py`) are pure unit tests with no external dependencies — they test parsing, conversion, and validation functions in isolation. All scraper tests (`test_scraper.py`) mock network and browser calls using `unittest.mock`, so they run in under two seconds with no internet access required. No test requires a real browser or network connection.
+
+## Running Tests
 
 ```bash
 pytest tests/ -v --cov=scraper --cov-report=term-missing
+ruff check .
 ```
-
-## Test Coverage
-
-| Test | File | Input | Expected |
-|------|------|-------|----------|
-| `test_clean_price_valid` | `test_utils.py` | `"CHF 2'450.—"` | `2450.0` |
-| `test_clean_price_returns_none` | `test_utils.py` | `None`, `""`, `"auf Anfrage"` | `None` |
-| `test_clean_rooms_valid` | `test_utils.py` | `"3.5 Zimmer"` | `3.5` |
-| `test_clean_rooms_none` | `test_utils.py` | `None`, `""` | `None` |
-| `test_clean_area_valid` | `test_utils.py` | `"85 m²"` | `85.0` |
-| `test_clean_area_none` | `test_utils.py` | `None` | `None` |
-| `test_extract_zip_valid` | `test_utils.py` | `"..., 8001 Zürich"` | `"8001"` |
-| `test_extract_zip_none` | `test_utils.py` | `None`, `"Zürich"` | `None` |
-| `test_extract_listing_id_valid` | `test_utils.py` | URL with ID | `"12345678"` |
-| `test_extract_listing_id_none` | `test_utils.py` | `None` | `None` |
-| `test_validate_listing_valid` | `test_utils.py` | `{url, title}` | `True` |
-| `test_validate_listing_missing_url` | `test_utils.py` | `{url: None}` | `False` |
-| `test_validate_listing_empty_dict` | `test_utils.py` | `{}` | `False` |
-| `test_scraper_default_values` | `test_scraper.py` | Default constructor | Correct defaults |
-| `test_scraper_custom_params` | `test_scraper.py` | Custom params | Stored correctly |
-| `test_accept_cookies_no_banner` | `test_scraper.py` | Mock driver | No exception |
-| `test_extract_single_listing_invalid` | `test_scraper.py` | Empty mock element | `None` |
-| `test_context_manager_quits_driver` | `test_scraper.py` | Mock driver | `quit()` called |
-
-## EDA Key Findings
-
-*Section populated after scraping run:*
-
-1. Median monthly rent: `[X]` CHF
-2. Room premium: each additional room adds ~`[X]`% to rent
-3. Most expensive ZIP code: `[X]` with median `[X]` CHF/m²
-4. Area-price correlation: r² = `[X]`
-5. "Auf Anfrage" listings: `[X]`% of total
 
 ## Project Structure
 
 ```
-immoscout-scraper/
+hltb-scraper/
 ├── scraper/
-│   ├── __init__.py          # Package init
-│   ├── config.py            # All constants, selectors, options
-│   ├── utils.py             # Parsing, validation, logging helpers
-│   └── scraper.py           # ImmoscoutScraper class
+│   ├── __init__.py
+│   ├── config.py          # All constants, selectors, and settings
+│   ├── utils.py           # Parsing, logging, retry, validation
+│   └── scraper.py         # HLTBScraper class (requests + Selenium)
 ├── data/
-│   └── .gitkeep             # Output directory for CSV and logs
+│   └── .gitkeep
 ├── notebooks/
-│   └── eda.ipynb            # Exploratory data analysis
+│   └── eda.ipynb          # Exploratory data analysis
 ├── tests/
 │   ├── __init__.py
-│   ├── test_utils.py        # 13 unit tests for utils
-│   └── test_scraper.py      # 5 integration tests with mocks
-├── .github/
-│   └── workflows/
-│       └── ci.yml           # GitHub Actions: ruff + pytest
-├── Dockerfile               # Chromium + Python 3.11
-├── docker-compose.yml       # Scraper + JupyterLab services
-├── pyproject.toml            # Dependencies and tool config
-├── .ruff.toml                # Linter rules
+│   ├── test_utils.py      # Unit tests for utility functions
+│   └── test_scraper.py    # Integration tests with mocks
+├── .github/workflows/
+│   └── ci.yml             # GitHub Actions CI pipeline
+├── Dockerfile
+├── docker-compose.yml
+├── pyproject.toml
 └── README.md
 ```
 
-## Ethical Guidelines
-
-- **robots.txt**: Checked at https://www.immoscout24.ch/robots.txt
-- **Rate limiting**: Random delays (1.5–3.5s) between page requests to avoid overloading the server
-- **No PII**: Only publicly visible listing data is collected; no personal contact information is stored
-- **Public data only**: All scraped data is publicly accessible without authentication
-- **Academic use**: This project is for educational and research purposes at FHNW
-
 ## License
 
-MIT
+Academic project — FHNW WDB Module.

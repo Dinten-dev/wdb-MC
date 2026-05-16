@@ -9,13 +9,11 @@ build/
 # Virtual environments
 .venv/
 venv/
-env/
 
 # IDE
 .idea/
 .vscode/
 *.swp
-*.swo
 
 # OS
 .DS_Store
@@ -24,10 +22,8 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
-# Project data (keep .gitkeep)
-data/*.csv
+# Project data — log files excluded, CSV and PNGs are deliverables
 data/*.log
-data/*.png
 
 # Environment
 .env

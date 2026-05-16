@@ -1,92 +1,81 @@
-"""Main scraper module for ImmoScout24 rental listings.
+"""Main scraper module with requests-based bulk collection and Selenium detail enrichment."""
 
-Provides the ImmoscoutScraper class that automates browsing,
-extraction, and persistence of apartment listing data from
-immoscout24.ch using Selenium WebDriver.
-
-Typical usage::
-
-    with ImmoscoutScraper(headless=True) as scraper:
-        df = scraper.run()
-        scraper.save(df)
-"""
-
+import json
 import logging
 import random
 import time
-from collections.abc import Callable
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
-import undetected_chromedriver as uc
+from howlongtobeatpy.HTMLRequests import HTMLRequests, SearchModifiers
+from selenium import webdriver
 from selenium.common.exceptions import (
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
     WebDriverException,
 )
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
-from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
 from scraper import config
 from scraper.utils import (
-    clean_area,
-    clean_price,
-    clean_rooms,
-    extract_listing_id,
-    extract_zip,
+    current_utc_iso,
+    seconds_to_hours,
     setup_logging,
-    try_extract,
-    validate_listing,
+    validate_game,
+    with_retry,
 )
 
-logger = logging.getLogger("immoscout-scraper")
+logger = logging.getLogger(__name__)
 
 
-class ImmoscoutScraper:
-    """Selenium-based scraper for ImmoScout24 rental listings.
+class HLTBScraper:
+    """Hybrid scraper for HowLongToBeat game completion time data.
 
-    Navigates immoscout24.ch search results, extracts listing data
-    from each page, handles pagination, and exports results as CSV.
-    Implements anti-detection measures and retry logic for robustness.
+    Uses two complementary components:
+    1. A requests-based bulk collector that paginates through the
+       HLTB internal JSON API (via howlongtobeatpy) to gather 10,000+
+       game entries efficiently using POST requests.
+    2. A Selenium-based detail enricher that visits individual game
+       pages to extract additional fields like developer and genre
+       for a sample of listings.
 
     Attributes:
-        headless: Whether to run Chrome in headless mode.
-        max_pages: Maximum number of result pages to scrape.
-        target_items: Target number of listings to collect.
-        driver: Selenium Chrome WebDriver instance (None until __enter__).
+        max_pages: Maximum search result pages to iterate.
+        target_items: Target number of unique games to collect.
+        driver: Selenium Chrome WebDriver (initialised only for enrichment).
     """
 
     def __init__(
         self,
-        headless: bool = True,
         max_pages: int = config.MAX_PAGES,
         target_items: int = config.TARGET_ITEMS,
+        headless: bool = True,
     ) -> None:
-        """Initialize the scraper with configuration parameters.
+        """Initialise the scraper with configuration parameters.
 
         Args:
-            headless: Run Chrome in headless mode. Defaults to True.
-            max_pages: Maximum result pages to scrape.
+            max_pages: Maximum result pages to scrape via the API.
             target_items: Target listing count to collect.
+            headless: Run Selenium Chrome in headless mode.
         """
-        self.headless = headless
         self.max_pages = max_pages
         self.target_items = target_items
-        self.driver: uc.Chrome | None = None
-        self._logger = setup_logging(config.LOG_FILE)
+        self.headless = headless
+        self.driver: webdriver.Chrome | None = None
+        self._logger = setup_logging()
 
-    def __enter__(self) -> "ImmoscoutScraper":
-        """Enter context manager and initialize the WebDriver.
+    def __enter__(self) -> "HLTBScraper":
+        """Enter context manager.
 
         Returns:
-            The scraper instance with an active WebDriver.
+            The scraper instance ready for use.
         """
-        self._init_driver()
         return self
 
     def __exit__(
@@ -95,7 +84,7 @@ class ImmoscoutScraper:
         exc_val: BaseException | None,
         exc_tb: object,
     ) -> bool:
-        """Exit context manager and quit the WebDriver.
+        """Exit context manager and close the Selenium driver if open.
 
         Args:
             exc_type: Exception type, if any.
@@ -107,410 +96,340 @@ class ImmoscoutScraper:
         """
         if self.driver is not None:
             self.driver.quit()
-            self._logger.info("Driver closed.")
+            logger.info("Selenium driver closed.")
         return False
 
-    def _init_driver(self) -> uc.Chrome:
-        """Initialize and configure the Chrome WebDriver.
+    def _fetch_search_page(self, page: int) -> list[dict]:
+        """Fetch a single page of search results via the HLTB internal API.
 
-        Uses undetected-chromedriver to bypass anti-bot detection.
-        Sets up Chrome with anti-detection options and a random
-        user agent.
+        Uses howlongtobeatpy's HTMLRequests to handle dynamic URL
+        resolution and auth token management. The response is a JSON
+        string containing game entries under the 'data' key.
+
+        Args:
+            page: Page number to fetch (1-indexed).
 
         Returns:
-            Configured undetected Chrome WebDriver instance.
-        """
-        options = uc.ChromeOptions()
+            List of raw game dicts from the API response.
 
+        Raises:
+            ValueError: If the response is not valid JSON.
+        """
+        raw_response = HTMLRequests.send_web_request(
+            game_name="",
+            search_modifiers=SearchModifiers.NONE,
+            page=page,
+        )
+
+        if raw_response is None:
+            logger.warning("API returned None for page %d.", page)
+            return []
+
+        # Detect HTML error pages returned during rate limiting
+        if raw_response.strip().startswith("<"):
+            logger.warning(
+                "API returned HTML instead of JSON on page %d (possible rate limit). "
+                "Content starts with: %s",
+                page,
+                raw_response[:100],
+            )
+            raise ValueError("API returned HTML instead of JSON")
+
+        try:
+            data = json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            logger.warning("JSON parse error on page %d: %s", page, exc)
+            logger.debug("Raw response: %s", raw_response[:500])
+            raise ValueError("Invalid JSON response") from exc
+
+        if "data" not in data:
+            logger.warning(
+                "Unexpected API response structure on page %d. Keys: %s",
+                page,
+                list(data.keys()),
+            )
+            logger.debug("Raw response body: %s", json.dumps(data)[:500])
+            return []
+
+        return data["data"]
+
+    def _parse_game_entry(self, raw: dict, page: int) -> dict | None:
+        """Parse a raw API game entry into a structured dict.
+
+        Uses .get() with None defaults for all field access so that
+        missing fields never cause crashes. Times are converted from
+        seconds to hours.
+
+        Args:
+            raw: Raw game dict from the API response.
+            page: Page number this game was found on.
+
+        Returns:
+            Parsed game dict matching CSV_COLUMNS, or None if invalid.
+        """
+        game = {
+            "game_id": raw.get("game_id"),
+            "title": raw.get("game_name"),
+            "game_type": raw.get("game_type"),
+            "platform": raw.get("profile_platform"),
+            "genre": None,
+            "developer": raw.get("profile_dev"),
+            "release_year": raw.get("release_world"),
+            "main_story_hours": seconds_to_hours(raw.get("comp_main")),
+            "main_plus_extras_hours": seconds_to_hours(raw.get("comp_plus")),
+            "completionist_hours": seconds_to_hours(raw.get("comp_100")),
+            "all_styles_hours": seconds_to_hours(raw.get("comp_all")),
+            "review_score": raw.get("review_score"),
+            "count_playing": raw.get("count_playing"),
+            "count_backlog": raw.get("count_backlog"),
+            "count_retired": raw.get("count_retired"),
+            "count_comp": raw.get("count_comp"),
+            "count_review": raw.get("count_review"),
+            "similarity_score": None,
+            "scraped_at": current_utc_iso(),
+            "source_page": page,
+        }
+
+        if not validate_game(game):
+            return None
+
+        return game
+
+    def collect_bulk(self) -> list[dict]:
+        """Collect game data in bulk using the requests-based API client.
+
+        Paginates through search results until the target count is
+        reached or no more results are returned.
+
+        Returns:
+            List of parsed game dicts.
+        """
+        all_games: list[dict] = []
+        seen_ids: set[int] = set()
+        consecutive_empty = 0
+        max_consecutive_empty = 3
+
+        for page in range(1, self.max_pages + 1):
+            if len(all_games) >= self.target_items:
+                logger.info(
+                    "Target of %s items reached at page %d.",
+                    f"{self.target_items:,}",
+                    page,
+                )
+                break
+
+            try:
+                raw_games = with_retry(self._fetch_search_page, page)
+            except (ValueError, OSError, Exception) as exc:
+                logger.error("Failed to fetch page %d after retries: %s", page, exc)
+                consecutive_empty += 1
+                if consecutive_empty >= max_consecutive_empty:
+                    logger.warning("Stopping after %d consecutive failures.", max_consecutive_empty)
+                    break
+                continue
+
+            if not raw_games:
+                consecutive_empty += 1
+                logger.info("Empty results on page %d (%d consecutive).", page, consecutive_empty)
+                if consecutive_empty >= max_consecutive_empty:
+                    logger.info("No more results. Stopping at page %d.", page)
+                    break
+                continue
+
+            consecutive_empty = 0
+            page_count = 0
+
+            for raw in raw_games:
+                game = self._parse_game_entry(raw, page)
+                if game is None:
+                    continue
+                gid = game["game_id"]
+                if gid in seen_ids:
+                    continue
+                seen_ids.add(gid)
+                all_games.append(game)
+                page_count += 1
+
+            logger.info(
+                "Page %d: %d new games (total: %s).",
+                page,
+                page_count,
+                f"{len(all_games):,}",
+            )
+
+            if page % 50 == 0:
+                logger.info(
+                    "Progress: %s / %s collected (page %d).",
+                    f"{len(all_games):,}",
+                    f"{self.target_items:,}",
+                    page,
+                )
+
+            # Rate limiting: random sleep between requests
+            sleep_duration = random.uniform(config.SLEEP_MIN, config.SLEEP_MAX)
+            time.sleep(sleep_duration)
+
+        logger.info("Bulk collection complete: %s unique games.", f"{len(all_games):,}")
+        return all_games
+
+    def _init_selenium(self) -> webdriver.Chrome:
+        """Initialise the Selenium Chrome WebDriver for detail page enrichment.
+
+        Returns:
+            Configured Chrome WebDriver instance.
+        """
+        options = webdriver.ChromeOptions()
         for opt in config.CHROME_OPTIONS:
             if not self.headless and "headless" in opt:
                 continue
-            # Skip options that undetected-chromedriver handles internally
-            if "disable-blink-features" in opt:
-                continue
             options.add_argument(opt)
+        options.add_argument(f"--user-agent={config.SCRAPER_USER_AGENT}")
 
-        user_agent = random.choice(config.USER_AGENTS)
-        options.add_argument(f"--user-agent={user_agent}")
-
-        self.driver = uc.Chrome(
-            options=options,
-            headless=self.headless,
-        )
-
+        service = ChromeService(ChromeDriverManager().install())
+        self.driver = webdriver.Chrome(service=service, options=options)
         self.driver.set_page_load_timeout(config.PAGE_LOAD_TIMEOUT)
-        self._logger.info("Driver initialized with headless=%s", self.headless)
-
+        logger.info("Selenium driver initialised (headless=%s).", self.headless)
         return self.driver
 
-    def _accept_cookies(self) -> None:
-        """Attempt to accept the cookie consent banner.
-
-        Tries each CSS selector from the cookie_accept fallback list.
-        This method never raises — the cookie banner is optional.
-        """
-        cookie_wait_timeout = 5
-
-        for selector in config.SELECTORS["cookie_accept"]:
-            try:
-                button = WebDriverWait(self.driver, cookie_wait_timeout).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                )
-                button.click()
-                self._logger.info(
-                    "Cookie banner accepted via selector: %s", selector
-                )
-                return
-            except (TimeoutException, NoSuchElementException, WebDriverException):
-                continue
-
-        self._logger.info("No cookie banner found, continuing.")
-
-    def _wait_for_listings(self) -> bool:
-        """Wait for listing elements to appear on the current page.
-
-        Tries each CSS selector from the listing_container fallback list
-        until one successfully locates at least one element.
-
-        Returns:
-            True if listings were found, False on timeout.
-        """
-        for selector in config.SELECTORS["listing_container"]:
-            try:
-                WebDriverWait(self.driver, config.ELEMENT_WAIT_TIMEOUT).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                )
-                return True
-            except TimeoutException:
-                continue
-
-        self._logger.warning("Timeout waiting for listings on current page.")
-        return False
-
-    def _extract_single_listing(self, element: WebElement) -> dict | None:
-        """Extract structured data from a single listing WebElement.
-
-        The ImmoScout24 listing card embeds rooms, area, and price as
-        separate ``<strong>`` and ``<span>`` elements within the card.
-        The URL is the ``href`` attribute of the card ``<a>`` element
-        itself. Title and address have dedicated child elements.
+    def _extract_detail_field(self, selector_key: str) -> str | None:
+        """Extract a text field from the current detail page using fallback selectors.
 
         Args:
-            element: A WebElement representing one listing card (an ``<a>`` tag).
+            selector_key: Key into config.DETAIL_SELECTORS.
 
         Returns:
-            A dict with all CSV_COLUMNS keys if valid, or None if
-            the listing fails validation (missing url or title).
+            The extracted text, or None if not found.
         """
-        raw_title = try_extract(element, config.SELECTORS["title"])
-        raw_address = try_extract(element, config.SELECTORS["address"])
-
-        # URL is the href of the card element itself (it's an <a> tag)
-        url = element.get_attribute("href")
-
-        # Rooms and area come from <strong> tags (e.g. "1.5 Zimmer", "24m²")
-        raw_rooms: str | None = None
-        raw_area: str | None = None
-        raw_price: str | None = None
-
-        for selector in config.SELECTORS["header_line"]:
+        selectors = config.DETAIL_SELECTORS.get(selector_key, [])
+        for selector in selectors:
             try:
-                strong_elements = element.find_elements(By.CSS_SELECTOR, selector)
-                for strong_el in strong_elements:
-                    text = strong_el.text.strip()
-                    if not text:
-                        continue
-                    if "Zimmer" in text or "Zi." in text:
-                        raw_rooms = text
-                    elif "m²" in text or "m2" in text:
-                        raw_area = text
-                break
-            except NoSuchElementException:
-                continue
-
-        # Price comes from <span> elements containing "CHF"
-        for selector in config.SELECTORS["price"]:
-            try:
-                span_elements = element.find_elements(By.CSS_SELECTOR, selector)
-                for span_el in span_elements:
-                    text = span_el.text.strip()
-                    if "CHF" in text:
-                        raw_price = text
-                        break
-                if raw_price:
-                    break
-            except NoSuchElementException:
-                continue
-
-        price_chf = clean_price(raw_price)
-        rooms = clean_rooms(raw_rooms)
-        area_m2 = clean_area(raw_area)
-        zip_code = extract_zip(raw_address)
-        listing_id = extract_listing_id(url)
-
-        # Compute price per square meter
-        price_per_m2: float | None = None
-        if price_chf is not None and area_m2 is not None and area_m2 > 0:
-            price_per_m2 = round(price_chf / area_m2, 2)
-
-        # Extract city name from address (text after ZIP code)
-        city: str | None = None
-        if raw_address and zip_code:
-            parts = raw_address.split(zip_code)
-            if len(parts) > 1 and parts[1].strip():
-                city = parts[1].strip().strip(",").strip()
-
-        listing: dict = {
-            "listing_id": listing_id,
-            "url": url,
-            "title": raw_title,
-            "price_chf": price_chf,
-            "rooms": rooms,
-            "area_m2": area_m2,
-            "price_per_m2": price_per_m2,
-            "address": raw_address,
-            "zip_code": zip_code,
-            "city": city,
-            "floor": None,
-            "available_from": None,
-            "scraped_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        if not validate_listing(listing):
-            return None
-
-        return listing
-
-    def _scrape_page(self, page_num: int) -> list[dict]:
-        """Scrape all listings from the current page.
-
-        Finds listing container elements using fallback selectors,
-        then extracts data from each one individually.
-
-        Args:
-            page_num: Current page number (for logging).
-
-        Returns:
-            List of listing dicts. Empty list if no elements found.
-        """
-        elements: list[WebElement] = []
-
-        for selector in config.SELECTORS["listing_container"]:
-            try:
-                found = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                if found:
-                    elements = found
-                    break
-            except NoSuchElementException:
-                continue
-
-        if not elements:
-            self._logger.warning(
-                "No listing elements found on page %d.", page_num
-            )
-            return []
-
-        listings: list[dict] = []
-
-        for element in elements:
-            try:
-                listing = self._extract_single_listing(element)
-                if listing is not None:
-                    listings.append(listing)
-            except StaleElementReferenceException:
-                self._logger.warning(
-                    "Stale element on page %d, skipping listing.", page_num
+                el = WebDriverWait(self.driver, config.ELEMENT_WAIT_TIMEOUT).until(
+                    ec.presence_of_element_located((By.CSS_SELECTOR, selector))
                 )
-                continue
-
-        self._logger.info(
-            "Page %d: scraped %d listings.", page_num, len(listings)
-        )
-        return listings
-
-    def _navigate_to_next_page(self) -> bool:
-        """Navigate to the next results page.
-
-        Finds and clicks the next-page button, then waits for the page
-        content to refresh by checking staleness of a current element.
-
-        Returns:
-            True if navigation succeeded, False if no next page
-            exists or an error occurred.
-        """
-        # Get a reference element to detect page transition
-        reference_element: WebElement | None = None
-        for selector in config.SELECTORS["listing_container"]:
-            try:
-                reference_element = self.driver.find_element(
-                    By.CSS_SELECTOR, selector
-                )
-                break
-            except NoSuchElementException:
-                continue
-
-        for selector in config.SELECTORS["next_page"]:
-            try:
-                button = WebDriverWait(
-                    self.driver, config.ELEMENT_WAIT_TIMEOUT
-                ).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                )
-
-                # Scroll button into view before clicking
-                self.driver.execute_script(
-                    "arguments[0].scrollIntoView(true);", button
-                )
-
-                button.click()
-
-                # Wait for page content to refresh
-                if reference_element is not None:
-                    WebDriverWait(
-                        self.driver, config.ELEMENT_WAIT_TIMEOUT
-                    ).until(EC.staleness_of(reference_element))
-
-                return True
-
-            except (TimeoutException, NoSuchElementException):
+                text = el.text.strip()
+                if text:
+                    return text
+            except (TimeoutException, NoSuchElementException, StaleElementReferenceException):
                 continue
             except WebDriverException as exc:
-                self._logger.warning("Navigation error: %s", exc)
-                return False
+                logger.debug("WebDriver error for selector '%s': %s", selector, exc)
+                continue
+        return None
 
-        return False
+    def _extract_detail_fields(self, element: WebElement | None = None) -> dict:
+        """Extract detail fields from the current game detail page.
 
-    def _with_retry(
-        self,
-        func: Callable[..., Any],
-        *args: Any,
-        max_retries: int = config.MAX_RETRIES,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute a function with exponential backoff retry logic.
+        Collects developer and genre from the rendered page using
+        CSS selector fallbacks for robustness against layout changes.
 
         Args:
-            func: The callable to execute.
-            *args: Positional arguments passed to func.
-            max_retries: Maximum number of retry attempts.
-            **kwargs: Keyword arguments passed to func.
+            element: Optional WebElement (unused, for test compatibility).
 
         Returns:
-            The return value of func on success.
-
-        Raises:
-            Exception: The last exception if all retries are exhausted.
+            Dict with 'developer' and 'genre' keys.
         """
-        last_exception: Exception | None = None
+        developer = self._extract_detail_field("developer")
+        genre_text = self._extract_detail_field("genres")
 
-        for attempt in range(max_retries):
+        return {
+            "developer": developer,
+            "genre": genre_text,
+        }
+
+    def enrich_with_details(self, games: list[dict]) -> list[dict]:
+        """Enrich a sample of games with detail page data via Selenium.
+
+        Visits individual game pages to extract developer and genre
+        information not available in the search API response.
+
+        Args:
+            games: Full list of collected games.
+
+        Returns:
+            The same list with enriched entries where possible.
+        """
+        sample_size = min(config.DETAIL_SAMPLE_SIZE, len(games))
+        if sample_size == 0:
+            return games
+
+        self._init_selenium()
+        sample_indices = random.sample(range(len(games)), sample_size)
+
+        logger.info("Enriching %d games with detail page data.", sample_size)
+        enriched_count = 0
+
+        for idx in sample_indices:
+            game = games[idx]
+            game_url = f"{config.GAME_PAGE_URL}{game['game_id']}"
+
             try:
-                return func(*args, **kwargs)
-            except (WebDriverException, TimeoutException, OSError) as exc:
-                last_exception = exc
-                if attempt < max_retries - 1:
-                    wait_time = config.RETRY_BACKOFF_BASE ** attempt
-                    self._logger.warning(
-                        "Retry %d/%d for %s: %s (waiting %.1fs)",
-                        attempt + 1,
-                        max_retries,
-                        func.__name__,
-                        exc,
-                        wait_time,
-                    )
-                    time.sleep(wait_time)
-                else:
-                    self._logger.error(
-                        "All %d retries exhausted for %s: %s",
-                        max_retries,
-                        func.__name__,
-                        exc,
-                    )
+                self.driver.get(game_url)
+                details = self._extract_detail_fields()
 
-        raise last_exception  # type: ignore[misc]
+                if details.get("developer"):
+                    game["developer"] = details["developer"]
+                if details.get("genre"):
+                    game["genre"] = details["genre"]
+                enriched_count += 1
+
+            except TimeoutException:
+                logger.warning("Timeout loading detail page for game %s.", game["game_id"])
+            except WebDriverException as exc:
+                logger.warning("WebDriver error for game %s: %s", game["game_id"], exc)
+
+            sleep_duration = random.uniform(config.DETAIL_SLEEP_MIN, config.DETAIL_SLEEP_MAX)
+            time.sleep(sleep_duration)
+
+        logger.info(
+            "Detail enrichment complete: %d/%d games enriched.",
+            enriched_count,
+            sample_size,
+        )
+        return games
 
     def run(self) -> pd.DataFrame:
         """Execute the full scraping workflow.
 
-        Opens the search page, accepts cookies, then iterates through
-        result pages collecting listing data until the target count
-        is reached or no more pages are available.
+        1. Collects games in bulk via the internal API (POST requests).
+        2. Enriches a sample with Selenium detail data.
+        3. Deduplicates and returns a DataFrame.
 
         Returns:
-            A pandas DataFrame with deduplicated listing data,
-            columns matching config.CSV_COLUMNS.
+            DataFrame with deduplicated game data.
         """
-        self._with_retry(self.driver.get, config.BASE_URL)
-        self._accept_cookies()
+        games = self.collect_bulk()
 
-        all_listings: list[dict] = []
-        page_num = 1
+        if games:
+            games = self.enrich_with_details(games)
 
-        while (
-            page_num <= self.max_pages
-            and len(all_listings) < self.target_items
-        ):
-            if not self._wait_for_listings():
-                self._logger.warning(
-                    "No listings on page %d, stopping.", page_num
-                )
-                break
+        df = pd.DataFrame(games)
 
-            page_listings = self._scrape_page(page_num)
-            all_listings.extend(page_listings)
+        # Ensure all expected columns exist
+        for col in config.CSV_COLUMNS:
+            if col not in df.columns:
+                df[col] = None
 
-            if page_num % 10 == 0:
-                self._logger.info(
-                    "Progress: %s / %s collected (page %d).",
-                    f"{len(all_listings):,}",
-                    f"{self.target_items:,}",
-                    page_num,
-                )
+        df = df[config.CSV_COLUMNS]
 
-            if not self._navigate_to_next_page():
-                self._logger.info(
-                    "No next page after page %d, stopping.", page_num
-                )
-                break
-
-            sleep_duration = random.uniform(config.SLEEP_MIN, config.SLEEP_MAX)
-            time.sleep(sleep_duration)
-
-            page_num += 1
-
-        # Deduplicate by URL
-        df = pd.DataFrame(all_listings, columns=config.CSV_COLUMNS)
         initial_count = len(df)
-        df = df.drop_duplicates(subset=["url"], keep="first")
-
+        df = df.drop_duplicates(subset=["game_id"], keep="first")
         if initial_count > len(df):
-            self._logger.info(
-                "Removed %d duplicate listings.", initial_count - len(df)
-            )
+            logger.info("Removed %d duplicate entries.", initial_count - len(df))
 
-        self._logger.info(
-            "Scraping complete: %s unique listings collected.",
-            f"{len(df):,}",
-        )
-
+        logger.info("Scraping complete: %s unique games collected.", f"{len(df):,}")
         return df
 
     def save(self, df: pd.DataFrame) -> None:
-        """Save the DataFrame to CSV.
-
-        Creates the output directory if it doesn't exist and writes
-        the data with UTF-8-BOM encoding for Excel compatibility.
+        """Save the DataFrame to CSV with UTF-8 BOM encoding.
 
         Args:
-            df: DataFrame with listing data to save.
+            df: DataFrame with game data to save.
         """
         output_path = Path(config.OUTPUT_CSV)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-
         df.to_csv(output_path, index=False, encoding="utf-8-sig")
-
-        self._logger.info(
-            "Saved %s rows x %d columns to %s.",
+        logger.info(
+            "Saved %s rows × %d columns to %s.",
             f"{len(df):,}",
             len(df.columns),
             config.OUTPUT_CSV,
@@ -518,11 +437,7 @@ class ImmoscoutScraper:
 
 
 if __name__ == "__main__":
-    with ImmoscoutScraper() as scraper:
+    with HLTBScraper() as scraper:
         result_df = scraper.run()
         scraper.save(result_df)
-        logger.info(
-            "Done. %d listings saved to %s.",
-            len(result_df),
-            config.OUTPUT_CSV,
-        )
+        logger.info("Done. %d games saved to %s.", len(result_df), config.OUTPUT_CSV)

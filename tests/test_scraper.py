@@ -1,80 +1,136 @@
-"""Unit tests for scraper.scraper using mocks for Selenium WebDriver."""
+"""Integration tests for the HLTBScraper class using mocks."""
 
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-from selenium.common.exceptions import NoSuchElementException
+import requests
+from selenium.common.exceptions import TimeoutException
 
-from scraper.scraper import ImmoscoutScraper
+from scraper.scraper import HLTBScraper
+from scraper.utils import with_retry
 
 
 class TestScraperInit:
-    """Tests for ImmoscoutScraper initialization."""
+    """Tests for HLTBScraper initialisation."""
 
-    def test_scraper_default_values(self) -> None:
-        """Verify default parameter values on construction."""
-        scraper = ImmoscoutScraper()
-        assert scraper.headless is True
-        assert scraper.max_pages > 0
+    def test_default_attributes(self) -> None:
+        """Verify that the scraper initialises with correct defaults without network."""
+        scraper = HLTBScraper()
+        assert scraper.max_pages == 600
         assert scraper.target_items == 10_000
+        assert scraper.headless is True
         assert scraper.driver is None
 
-    def test_scraper_custom_params(self) -> None:
-        """Verify that custom parameters are stored correctly."""
-        scraper = ImmoscoutScraper(
-            headless=False, max_pages=5, target_items=100
-        )
-        assert scraper.headless is False
-        assert scraper.max_pages == 5
+    def test_custom_attributes(self) -> None:
+        """Verify that custom init parameters are stored correctly."""
+        scraper = HLTBScraper(max_pages=10, target_items=100, headless=False)
+        assert scraper.max_pages == 10
         assert scraper.target_items == 100
+        assert scraper.headless is False
 
 
-class TestCookieHandling:
-    """Tests for cookie banner acceptance logic."""
+class TestRetryWrapper:
+    """Tests for the with_retry utility function."""
 
-    def test_accept_cookies_no_banner(self) -> None:
-        """Verify that _accept_cookies does not raise when no banner exists.
+    def test_retry_on_persistent_failure(self) -> None:
+        """Verify retry calls the function the correct number of times before raising."""
+        mock_func = MagicMock(side_effect=requests.exceptions.ConnectionError("fail"))
+        mock_func.__name__ = "mock_func"
 
-        A mock driver whose find_element always raises simulates
-        a page without a cookie consent banner.
-        """
-        scraper = ImmoscoutScraper()
-        mock_driver = MagicMock()
-        mock_driver.find_element.side_effect = NoSuchElementException()
-        scraper.driver = mock_driver
+        with pytest.raises(requests.exceptions.ConnectionError):
+            with_retry(mock_func, max_retries=3, backoff_base=0.01)
 
-        # Must not raise — cookie banner is optional
-        scraper._accept_cookies()
+        assert mock_func.call_count == 3
+
+    def test_retry_succeeds_on_second_attempt(self) -> None:
+        """Verify retry returns the result when the function eventually succeeds."""
+        mock_func = MagicMock(side_effect=[requests.exceptions.Timeout("slow"), "success"])
+        mock_func.__name__ = "mock_func"
+
+        result = with_retry(mock_func, max_retries=3, backoff_base=0.01)
+
+        assert result == "success"
+        assert mock_func.call_count == 2
+
+    def test_no_retry_on_success(self) -> None:
+        """Verify the function is called exactly once on immediate success."""
+        mock_func = MagicMock(return_value="ok")
+        mock_func.__name__ = "mock_func"
+
+        result = with_retry(mock_func, max_retries=3, backoff_base=0.01)
+
+        assert result == "ok"
+        assert mock_func.call_count == 1
 
 
-class TestExtraction:
-    """Tests for listing extraction logic."""
+class TestParseGameEntry:
+    """Tests for _parse_game_entry."""
 
-    def test_extract_single_listing_invalid_element(self) -> None:
-        """Verify that an element yielding no url/title returns None.
+    def test_valid_entry(self) -> None:
+        """Verify a complete API response entry is correctly parsed."""
+        scraper = HLTBScraper()
+        raw = {
+            "game_id": 38019,
+            "game_name": "Zelda: Breath of the Wild",
+            "game_type": "game",
+            "profile_platform": "Nintendo Switch",
+            "profile_dev": "Nintendo",
+            "release_world": 2017,
+            "comp_main": 181224,
+            "comp_plus": 354348,
+            "comp_100": 697032,
+            "comp_all": 333720,
+            "review_score": 93,
+            "count_playing": 500,
+            "count_backlog": 1000,
+            "count_retired": 200,
+            "count_comp": 3000,
+            "count_review": 150,
+        }
 
-        A mock element whose find_element always raises simulates
-        an empty or broken listing card.
-        """
-        scraper = ImmoscoutScraper()
-        mock_element = MagicMock()
-        mock_element.find_element.side_effect = NoSuchElementException()
-        mock_element.find_elements.return_value = []
-        mock_element.get_attribute.return_value = None
+        result = scraper._parse_game_entry(raw, page=1)
 
-        result = scraper._extract_single_listing(mock_element)
+        assert result is not None
+        assert result["game_id"] == 38019
+        assert result["title"] == "Zelda: Breath of the Wild"
+        assert result["main_story_hours"] == 50.34
+        assert result["source_page"] == 1
+
+    def test_missing_fields(self) -> None:
+        """Verify that entries with missing optional fields still parse."""
+        scraper = HLTBScraper()
+        raw = {
+            "game_id": 99999,
+            "game_name": "Unknown Game",
+        }
+
+        result = scraper._parse_game_entry(raw, page=5)
+
+        assert result is not None
+        assert result["main_story_hours"] is None
+        assert result["review_score"] is None
+
+    def test_invalid_entry(self) -> None:
+        """Verify that an entry without a game name returns None."""
+        scraper = HLTBScraper()
+        result = scraper._parse_game_entry({}, page=1)
         assert result is None
 
 
-class TestContextManager:
-    """Tests for context manager protocol."""
+class TestDetailExtraction:
+    """Tests for Selenium detail page extraction."""
 
-    def test_context_manager_quits_driver(self) -> None:
-        """Verify that __exit__ calls driver.quit() exactly once."""
-        scraper = ImmoscoutScraper()
+    def test_extract_detail_fields_no_driver(self) -> None:
+        """Verify that _extract_detail_fields handles a mock driver with no elements."""
+        scraper = HLTBScraper()
         mock_driver = MagicMock()
+        mock_driver.find_element.side_effect = Exception("no element")
         scraper.driver = mock_driver
 
-        scraper.__exit__(None, None, None)
+        # Mock WebDriverWait to raise TimeoutException for all selectors
+        with patch("scraper.scraper.WebDriverWait") as mock_wait:
+            mock_wait.return_value.until.side_effect = TimeoutException("timeout")
+            result = scraper._extract_detail_fields()
 
-        mock_driver.quit.assert_called_once()
+        assert result["developer"] is None
+        assert result["genre"] is None

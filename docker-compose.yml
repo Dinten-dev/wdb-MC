@@ -1,27 +1,20 @@
 services:
   scraper:
     build: .
-    container_name: immoscout-scraper
+    container_name: hltb-scraper
     volumes:
       - ./data:/app/data
-    environment:
-      - PYTHONUNBUFFERED=1
-    restart: "no"
+    command: python -m scraper.scraper
 
   notebook:
     build: .
-    container_name: immoscout-notebook
-    command: >
-      jupyter lab
-      --ip=0.0.0.0
-      --port=8888
-      --no-browser
-      --allow-root
-      --NotebookApp.token=''
+    container_name: hltb-notebook
     ports:
       - "8888:8888"
     volumes:
       - ./data:/app/data
       - ./notebooks:/app/notebooks
-    environment:
-      - PYTHONUNBUFFERED=1
+    command: >
+      jupyter lab --ip=0.0.0.0 --port=8888
+      --no-browser --allow-root
+      --NotebookApp.token=''

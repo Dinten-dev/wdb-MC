@@ -1,35 +1,40 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages.find]
-include = ["scraper*"]
-
 [project]
-name = "immoscout-scraper"
-version = "0.1.0"
-description = "Selenium-based scraper for rental listings on immoscout24.ch"
+name = "hltb-scraper"
+version = "1.0.0"
+description = "HowLongToBeat game completion time scraper and analysis"
 requires-python = ">=3.11"
-license = "MIT"
 dependencies = [
+    "requests>=2.31.0,<3",
+    "beautifulsoup4>=4.12.0,<5",
+    "fake-useragent>=1.4.0,<3",
     "selenium>=4.18.1,<5",
     "webdriver-manager>=4.0.1,<5",
-    "undetected-chromedriver>=3.5,<4",
     "pandas>=2.2.0,<3",
     "numpy>=1.26.0,<3",
-    "jupyter>=1.0.0,<2",
-    "matplotlib>=3.8.0,<4",
-    "seaborn>=0.13.0,<1",
-    "plotly>=5.18.0,<6",
-    "pytest>=8.0.0,<9",
-    "pytest-mock>=3.12.0,<4",
-    "pytest-cov>=4.1.0,<6",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "pytest>=8.0.0,<9",
+    "pytest-cov>=4.1.0,<6",
     "ruff>=0.3.0,<1",
 ]
+notebook = [
+    "jupyter>=1.0.0,<2",
+    "jupyterlab>=4.0.0,<5",
+    "matplotlib>=3.8.0,<4",
+    "seaborn>=0.13.0,<1",
+    "plotly>=5.18.0,<6",
+    "kaleido>=0.2.1,<1",
+    "nbformat>=5.9.0,<6",
+]
+
+[tool.setuptools.packages.find]
+include = ["scraper*"]
 
 [tool.ruff]
 line-length = 100
@@ -37,9 +42,13 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "N"]
-ignore = ["E501"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["scraper"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
 addopts = "-v --tb=short"

@@ -1,1 +1,1 @@
-"""Test-Suite für den ImmoScout24-Scraper."""
+"""Test package for the HLTB scraper."""

@@ -1,167 +1,117 @@
-"""Unit tests for scraper.utils parsing and validation functions."""
+"""Unit tests for scraper utility functions."""
 
 import pytest
 
-from scraper.utils import (
-    clean_area,
-    clean_price,
-    clean_rooms,
-    extract_listing_id,
-    extract_zip,
-    validate_listing,
-)
+from scraper.utils import extract_game_id, parse_time_string, seconds_to_hours, validate_game
 
 
-class TestCleanPrice:
-    """Tests for the clean_price function."""
+class TestParseTimeString:
+    """Tests for the parse_time_string function."""
 
     @pytest.mark.parametrize(
         ("raw", "expected"),
         [
-            ("CHF 2'450.—", 2450.0),
-            ("ab CHF 1'800/Mt.", 1800.0),
-            ("CHF 3.500", 3500.0),
-            ("2450", 2450.0),
-            ("1'200", 1200.0),
+            ("12h", 12.0),
+            ("1h 30m", 1.5),
+            ("45m", 0.75),
+            ("0h 30m", 0.5),
+            ("100h", 100.0),
+            ("2h 15m", 2.25),
+            ("5H 0M", 5.0),
+            ("3.5", 3.5),
+        ],
+        ids=[
+            "hours_only",
+            "hours_and_minutes",
+            "minutes_only",
+            "zero_hours_with_minutes",
+            "large_hours",
+            "mixed",
+            "uppercase",
+            "plain_number",
         ],
     )
-    def test_clean_price_valid(self, raw: str, expected: float) -> None:
-        """Verify that valid price strings are parsed correctly.
-
-        Args:
-            raw: Input price string.
-            expected: Expected parsed float value.
-        """
-        assert clean_price(raw) == expected
+    def test_valid_inputs(self, raw: str, expected: float) -> None:
+        """Verify that valid time strings parse to the correct decimal hours."""
+        assert parse_time_string(raw) == expected
 
     @pytest.mark.parametrize(
         "raw",
-        [None, "", "   ", "auf Anfrage", "Preis auf Anfrage"],
+        [None, "", "--", "0", "N/A", "—", "no data"],
+        ids=["none", "empty", "dashes", "zero", "na", "em_dash", "text"],
     )
-    def test_clean_price_returns_none(self, raw: str | None) -> None:
-        """Verify that unparseable or empty inputs return None.
-
-        Args:
-            raw: Input that should yield None.
-        """
-        assert clean_price(raw) is None
+    def test_invalid_inputs(self, raw: str | None) -> None:
+        """Verify that invalid or missing time values return None."""
+        assert parse_time_string(raw) is None
 
 
-class TestCleanRooms:
-    """Tests for the clean_rooms function."""
+class TestSecondsToHours:
+    """Tests for seconds_to_hours conversion."""
 
     @pytest.mark.parametrize(
-        ("raw", "expected"),
+        ("seconds", "expected"),
         [
-            ("3.5 Zimmer", 3.5),
-            ("3,5 Zi.", 3.5),
-            ("4", 4.0),
-            ("4.5", 4.5),
+            (3600, 1.0),
+            (5400, 1.5),
+            (7200, 2.0),
+            (180000, 50.0),
+            (0, None),
+            (None, None),
         ],
+        ids=["one_hour", "ninety_minutes", "two_hours", "fifty_hours", "zero", "none"],
     )
-    def test_clean_rooms_valid(self, raw: str, expected: float) -> None:
-        """Verify that valid room strings are parsed correctly.
-
-        Args:
-            raw: Input room string.
-            expected: Expected parsed float value.
-        """
-        assert clean_rooms(raw) == expected
-
-    @pytest.mark.parametrize("raw", [None, ""])
-    def test_clean_rooms_none(self, raw: str | None) -> None:
-        """Verify that None and empty string return None.
-
-        Args:
-            raw: Input that should yield None.
-        """
-        assert clean_rooms(raw) is None
+    def test_conversion(self, seconds: int | None, expected: float | None) -> None:
+        """Verify seconds-to-hours conversion with known values."""
+        assert seconds_to_hours(seconds) == expected
 
 
-class TestCleanArea:
-    """Tests for the clean_area function."""
+class TestExtractGameId:
+    """Tests for the extract_game_id function."""
+
+    def test_valid_url(self) -> None:
+        """Verify that a standard HLTB game URL yields the correct ID."""
+        assert extract_game_id("https://howlongtobeat.com/game/12345") == "12345"
+
+    def test_valid_url_trailing_slash(self) -> None:
+        """Verify extraction works with a trailing slash."""
+        assert extract_game_id("https://howlongtobeat.com/game/67890/") == "67890"
 
     @pytest.mark.parametrize(
-        ("raw", "expected"),
-        [
-            ("85 m²", 85.0),
-            ("ca. 85 m²", 85.0),
-            ("85.5 m²", 85.5),
-            ("120m2", 120.0),
-        ],
+        "url",
+        [None, "", "https://example.com", "not-a-url"],
+        ids=["none", "empty", "wrong_domain", "garbage"],
     )
-    def test_clean_area_valid(self, raw: str, expected: float) -> None:
-        """Verify that valid area strings are parsed correctly.
-
-        Args:
-            raw: Input area string.
-            expected: Expected parsed float value.
-        """
-        assert clean_area(raw) == expected
-
-    def test_clean_area_none(self) -> None:
-        """Verify that None returns None."""
-        assert clean_area(None) is None
+    def test_invalid_url(self, url: str | None) -> None:
+        """Verify that invalid URLs return None."""
+        assert extract_game_id(url) is None
 
 
-class TestExtractZip:
-    """Tests for the extract_zip function."""
+class TestValidateGame:
+    """Tests for the validate_game function."""
 
-    @pytest.mark.parametrize(
-        ("address", "expected"),
-        [
-            ("Musterstrasse 12, 8001 Zürich", "8001"),
-            ("8050 Zürich-Oerlikon", "8050"),
-            ("Bahnhofstrasse 1, CH-8001 Zürich", "8001"),
-        ],
-    )
-    def test_extract_zip_valid(
-        self, address: str, expected: str
-    ) -> None:
-        """Verify that Swiss ZIP codes are extracted correctly.
+    def test_valid_game(self) -> None:
+        """Verify that a game dict with required fields passes validation."""
+        game = {
+            "game_id": 12345,
+            "title": "The Legend of Zelda",
+            "main_story_hours": 50.0,
+        }
+        assert validate_game(game) is True
 
-        Args:
-            address: Input address string.
-            expected: Expected 4-digit ZIP code.
-        """
-        assert extract_zip(address) == expected
+    def test_missing_id(self) -> None:
+        """Verify that a game dict missing game_id fails validation."""
+        game = {"title": "Some Game"}
+        assert validate_game(game) is False
 
-    @pytest.mark.parametrize("address", [None, "Zürich"])
-    def test_extract_zip_none(self, address: str | None) -> None:
-        """Verify that None and ZIP-less strings return None.
+    def test_missing_title(self) -> None:
+        """Verify that a game dict missing title fails validation."""
+        game = {"game_id": 123}
+        assert validate_game(game) is False
 
-        Args:
-            address: Input that should yield None.
-        """
-        assert extract_zip(address) is None
-
-
-class TestExtractListingId:
-    """Tests for the extract_listing_id function."""
-
-    def test_extract_listing_id_valid(self) -> None:
-        """Verify that the trailing numeric ID is extracted from a URL."""
-        url = "https://www.immoscout24.ch/de/d/3-zimmer-wohnung-zuerich-12345678"
-        assert extract_listing_id(url) == "12345678"
-
-    def test_extract_listing_id_none(self) -> None:
-        """Verify that None input returns None."""
-        assert extract_listing_id(None) is None
-
-
-class TestValidateListing:
-    """Tests for the validate_listing function."""
-
-    def test_validate_listing_valid(self) -> None:
-        """Verify that a listing with url and title passes validation."""
-        listing = {"url": "https://example.com", "title": "Wohnung"}
-        assert validate_listing(listing) is True
-
-    def test_validate_listing_missing_url(self) -> None:
-        """Verify that a listing with None url fails validation."""
-        listing = {"url": None, "title": "Wohnung"}
-        assert validate_listing(listing) is False
-
-    def test_validate_listing_empty_dict(self) -> None:
+    def test_empty_dict(self) -> None:
         """Verify that an empty dict fails validation."""
-        assert validate_listing({}) is False
+        assert validate_game({}) is False
+
+    def test_none_values(self) -> None:
+        """Verify that None values for required fields fail validation."""
+        assert validate_game({"game_id": None, "title": None}) is False
