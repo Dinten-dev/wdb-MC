@@ -20,19 +20,17 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from selenium import webdriver
+import undetected_chromedriver as uc
 from selenium.common.exceptions import (
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
     WebDriverException,
 )
-from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
 
 from scraper import config
 from scraper.utils import (
@@ -79,7 +77,7 @@ class ImmoscoutScraper:
         self.headless = headless
         self.max_pages = max_pages
         self.target_items = target_items
-        self.driver: webdriver.Chrome | None = None
+        self.driver: uc.Chrome | None = None
         self._logger = setup_logging(config.LOG_FILE)
 
     def __enter__(self) -> "ImmoscoutScraper":
@@ -112,38 +110,32 @@ class ImmoscoutScraper:
             self._logger.info("Driver closed.")
         return False
 
-    def _init_driver(self) -> webdriver.Chrome:
+    def _init_driver(self) -> uc.Chrome:
         """Initialize and configure the Chrome WebDriver.
 
-        Sets up Chrome with anti-detection options, a random user agent,
-        and removes the navigator.webdriver property to avoid bot detection.
-        Uses webdriver-manager for automatic ChromeDriver management.
+        Uses undetected-chromedriver to bypass anti-bot detection.
+        Sets up Chrome with anti-detection options and a random
+        user agent.
 
         Returns:
-            Configured Chrome WebDriver instance.
+            Configured undetected Chrome WebDriver instance.
         """
-        options = webdriver.ChromeOptions()
+        options = uc.ChromeOptions()
 
         for opt in config.CHROME_OPTIONS:
             if not self.headless and "headless" in opt:
+                continue
+            # Skip options that undetected-chromedriver handles internally
+            if "disable-blink-features" in opt:
                 continue
             options.add_argument(opt)
 
         user_agent = random.choice(config.USER_AGENTS)
         options.add_argument(f"--user-agent={user_agent}")
 
-        service = ChromeService(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=options)
-
-        # Remove navigator.webdriver flag to avoid bot detection
-        self.driver.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {
-                "source": (
-                    "Object.defineProperty(navigator, 'webdriver', "
-                    "{get: () => undefined})"
-                )
-            },
+        self.driver = uc.Chrome(
+            options=options,
+            headless=self.headless,
         )
 
         self.driver.set_page_load_timeout(config.PAGE_LOAD_TIMEOUT)
