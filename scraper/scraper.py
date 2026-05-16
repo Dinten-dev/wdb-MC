@@ -198,24 +198,57 @@ class ImmoscoutScraper:
     def _extract_single_listing(self, element: WebElement) -> dict | None:
         """Extract structured data from a single listing WebElement.
 
-        Parses all available fields from the element, cleans and validates
-        them, and computes derived fields like price_per_m2.
+        The ImmoScout24 listing card embeds rooms, area, and price as
+        separate ``<strong>`` and ``<span>`` elements within the card.
+        The URL is the ``href`` attribute of the card ``<a>`` element
+        itself. Title and address have dedicated child elements.
 
         Args:
-            element: A WebElement representing one listing card.
+            element: A WebElement representing one listing card (an ``<a>`` tag).
 
         Returns:
             A dict with all CSV_COLUMNS keys if valid, or None if
             the listing fails validation (missing url or title).
         """
         raw_title = try_extract(element, config.SELECTORS["title"])
-        raw_price = try_extract(element, config.SELECTORS["price"])
-        raw_rooms = try_extract(element, config.SELECTORS["rooms"])
-        raw_area = try_extract(element, config.SELECTORS["area"])
         raw_address = try_extract(element, config.SELECTORS["address"])
-        url = try_extract(
-            element, config.SELECTORS["listing_url"], attribute="href"
-        )
+
+        # URL is the href of the card element itself (it's an <a> tag)
+        url = element.get_attribute("href")
+
+        # Rooms and area come from <strong> tags (e.g. "1.5 Zimmer", "24m²")
+        raw_rooms: str | None = None
+        raw_area: str | None = None
+        raw_price: str | None = None
+
+        for selector in config.SELECTORS["header_line"]:
+            try:
+                strong_elements = element.find_elements(By.CSS_SELECTOR, selector)
+                for strong_el in strong_elements:
+                    text = strong_el.text.strip()
+                    if not text:
+                        continue
+                    if "Zimmer" in text or "Zi." in text:
+                        raw_rooms = text
+                    elif "m²" in text or "m2" in text:
+                        raw_area = text
+                break
+            except NoSuchElementException:
+                continue
+
+        # Price comes from <span> elements containing "CHF"
+        for selector in config.SELECTORS["price"]:
+            try:
+                span_elements = element.find_elements(By.CSS_SELECTOR, selector)
+                for span_el in span_elements:
+                    text = span_el.text.strip()
+                    if "CHF" in text:
+                        raw_price = text
+                        break
+                if raw_price:
+                    break
+            except NoSuchElementException:
+                continue
 
         price_chf = clean_price(raw_price)
         rooms = clean_rooms(raw_rooms)

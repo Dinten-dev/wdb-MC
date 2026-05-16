@@ -28,50 +28,35 @@ TARGET_ITEMS: int = 10_000
 # ---------------------------------------------------------------------------
 SELECTORS: dict[str, list[str]] = {
     "listing_container": [
-        "article[data-test='result-list-item']",
-        "[class*='ResultListItem']",
-        "[class*='ListItem_item']",
+        "a[class*='HgCardElevated_content']",
+        "a[class*='HgCardElevated']",
+        "[class*='HgCardElevated']",
+    ],
+    "header_line": [
+        "div > strong",
+        "strong",
     ],
     "price": [
-        "[data-test='price']",
-        "[class*='Price_price']",
-        "strong[class*='price']",
-    ],
-    "rooms": [
-        "[data-test='rooms']",
-        "[class*='Rooms']",
-        "[class*='rooms']",
-    ],
-    "area": [
-        "[data-test='livingSpace']",
-        "[class*='Area']",
-        "[class*='livingSpace']",
+        "span",
     ],
     "address": [
-        "[data-test='address']",
-        "[class*='Address']",
         "address",
+        "[class*='Address']",
     ],
     "title": [
-        "h2[class*='Title']",
-        "[data-test='title']",
-        "h2",
-    ],
-    "listing_url": [
-        "a[href*='/de/d/']",
-        "a[href*='immoscout24.ch']",
-        "article a",
+        "p[class*='title'] span",
+        "p span",
+        "p[class*='HgCardElevated']",
     ],
     "next_page": [
-        "[data-test='pagination-next']",
+        "a[aria-label='Zur nächsten Seite']",
         "a[aria-label='Nächste Seite']",
         "[class*='Pagination'] a[rel='next']",
     ],
     "cookie_accept": [
         "#onetrust-accept-btn-handler",
+        "button.accept-all-cookies",
         "[data-testid='cookie-accept-all']",
-        "button[class*='accept']",
-        ".accept-all-cookies",
     ],
 }
 

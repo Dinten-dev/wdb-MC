@@ -59,6 +59,8 @@ class TestExtraction:
         scraper = ImmoscoutScraper()
         mock_element = MagicMock()
         mock_element.find_element.side_effect = NoSuchElementException()
+        mock_element.find_elements.return_value = []
+        mock_element.get_attribute.return_value = None
 
         result = scraper._extract_single_listing(mock_element)
         assert result is None
